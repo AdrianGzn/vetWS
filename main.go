@@ -16,6 +16,9 @@ func main() {
 	// Bluetooth Bridge WebSocket (envía datos del Bluetooth Bridge)
 	r.GET("/ws/bluetooth", wsHandler.HandleBluetooth)
 
+	// Comandos WebSocket (Bluetooth Bridge recibe comandos)
+	r.GET("/ws/commands", wsHandler.HandleCommands)
+
 	// ESP32 directo (compatibilidad heredada)
 	r.GET("/ws/esp32", wsHandler.HandleESP32)
 

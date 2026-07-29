@@ -14,6 +14,7 @@ import (
 type WebSocketHandler struct {
 	frontends map[*websocket.Conn]bool
 	bluetooth map[*websocket.Conn]bool // Conexiones desde Bluetooth Bridge
+	commands  map[*websocket.Conn]bool // Conexiones para COMANDOS (solo recepción)
 	mutex     sync.Mutex
 	upgrader  websocket.Upgrader
 }
@@ -76,6 +77,7 @@ func NewWebSocketHandler() *WebSocketHandler {
 	return &WebSocketHandler{
 		frontends: make(map[*websocket.Conn]bool),
 		bluetooth: make(map[*websocket.Conn]bool),
+		commands:  make(map[*websocket.Conn]bool),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -107,8 +109,8 @@ func (h *WebSocketHandler) HandleFrontend(c *gin.Context) {
 
 		log.Printf("[WS-COMMAND] Comando recibido: %s (tipo: %s)", cmd.Action, cmd.Type)
 
-		// Reenviar comando al Bluetooth Bridge
-		h.broadcastCommandToBluetooth(cmd)
+		// Reenviar comando al Bluetooth Bridge via /ws/commands
+		h.broadcastCommandsToClients(cmd)
 	}
 
 	h.mutex.Lock()
@@ -160,6 +162,43 @@ func (h *WebSocketHandler) HandleBluetooth(c *gin.Context) {
 	log.Println("[WS-BLUETOOTH] Bluetooth Bridge desconectado")
 }
 
+/* ================= COMANDOS (Bluetooth Bridge Recepción) ================= */
+
+// HandleCommands - Endpoint para que el Bluetooth Bridge reciba comandos
+func (h *WebSocketHandler) HandleCommands(c *gin.Context) {
+	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Println("[WS-ERROR] Commands upgrade error:", err)
+		return
+	}
+	defer conn.Close()
+
+	h.mutex.Lock()
+	h.commands[conn] = true
+	h.mutex.Unlock()
+
+	log.Println("[WS-COMMANDS] Cliente de comandos conectado (Bluetooth Bridge)")
+
+	for {
+		var cmd CommandMessage
+		if err := conn.ReadJSON(&cmd); err != nil {
+			log.Printf("[WS-COMMANDS] Error de lectura: %v", err)
+			break
+		}
+
+		log.Printf("[WS-COMMAND] Comando recibido en endpoint /ws/commands: %s (tipo: %s)", cmd.Action, cmd.Type)
+
+		// Reenviar comando al Bluetooth Bridge
+		h.broadcastCommandsToClients(cmd)
+	}
+
+	h.mutex.Lock()
+	delete(h.commands, conn)
+	h.mutex.Unlock()
+
+	log.Println("[WS-COMMANDS] Cliente de comandos desconectado")
+}
+
 /* ================= ESP32 (LEGADO) ================= */
 
 // HandleESP32 - Mantener para compatibilidad con ESP32 directos
@@ -192,25 +231,6 @@ func (h *WebSocketHandler) HandleESP32(c *gin.Context) {
 }
 
 /* ================= BROADCAST ================= */
-
-func (h *WebSocketHandler) broadcastCommandToBluetooth(cmd CommandMessage) {
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
-
-	// Enviar comando a todas las conexiones Bluetooth
-	for conn := range h.bluetooth {
-		if err := conn.WriteJSON(cmd); err != nil {
-			log.Printf("[WS-ERROR] Error enviando comando: %v", err)
-			conn.Close()
-			delete(h.bluetooth, conn)
-		}
-	}
-
-	// Log
-	if len(h.bluetooth) > 0 {
-		log.Printf("[WS-BROADCAST] Comando enviado a %d cliente(s) Bluetooth", len(h.bluetooth))
-	}
-}
 
 func (h *WebSocketHandler) broadcastDataToFrontend(data interface{}) {
 	h.mutex.Lock()
@@ -251,6 +271,25 @@ func (h *WebSocketHandler) broadcastDataToFrontend(data interface{}) {
 	// Log
 	if len(h.frontends) > 0 {
 		log.Printf("[WS-BROADCAST] Datos enviados a %d cliente(s) frontend", len(h.frontends))
+	}
+}
+
+func (h *WebSocketHandler) broadcastCommandsToClients(cmd CommandMessage) {
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+
+	// Enviar comando a todas las conexiones de comandos (Bluetooth Bridge)
+	for conn := range h.commands {
+		if err := conn.WriteJSON(cmd); err != nil {
+			log.Printf("[WS-ERROR] Error enviando comando a cliente: %v", err)
+			conn.Close()
+			delete(h.commands, conn)
+		}
+	}
+
+	// Log
+	if len(h.commands) > 0 {
+		log.Printf("[WS-BROADCAST] Comando enviado a %d cliente(s) de comandos", len(h.commands))
 	}
 }
 
